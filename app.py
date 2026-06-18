@@ -40,12 +40,24 @@ MODELS_DIR = os.path.join(BASE_DIR, '..', 'models')
 # ── Load resources ───────────────────────────────────────────────────
 @st.cache_resource
 def load_model():
-    with open(os.path.join(MODELS_DIR, 'best_model.pkl'), 'rb') as f:
+    base       = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(base, 'models', 'best_model.pkl')
+    meta_path  = os.path.join(base, 'models', 'model_metadata.json')
+
+    # Debug — remove after fixing
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(
+            f"Model not found at: {model_path}\n"
+            f"BASE_DIR is: {base}\n"
+            f"Files in BASE_DIR: {os.listdir(base)}\n"
+            f"Files in models/: {os.listdir(os.path.join(base, 'models')) if os.path.exists(os.path.join(base, 'models')) else 'models/ folder missing'}"
+        )
+
+    with open(model_path, 'rb') as f:
         pipeline = pickle.load(f)
-    with open(os.path.join(MODELS_DIR, 'model_metadata.json'), 'r') as f:
+    with open(meta_path, 'r') as f:
         metadata = json.load(f)
     return pipeline, metadata
-
 
 @st.cache_resource
 def load_nlp():
@@ -417,8 +429,8 @@ with st.sidebar:
         col_a.metric("Accuracy", f"{metadata.get('accuracy', 0)*100:.1f}%")
         col_b.metric("ROC-AUC",  f"{metadata.get('roc_auc',  0)*100:.1f}%")
         st.caption("Trained on WELFake — 71,979 articles")
-    except Exception:
-        st.warning("Model files not found.")
+    except Exception as e:
+        st.warning(f"Model error: {str(e)}")
 
     st.divider()
     st.subheader("ℹ️ How it works")
