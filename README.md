@@ -1,6 +1,5 @@
 # 🔍 VeriFact — AI-Powered Fake News Detector for Students
 
-> Built for **EDUNET Foundation × IBM SkillsBuild AI Internship — May 2026 Batch**
 
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](YOUR_DEPLOYED_LINK_HERE)
 
@@ -62,9 +61,9 @@ verifact/
 ├── models/
 │   ├── best_model.pkl
 │   └── model_metadata.json
-├── app/
-│   ├── app.py
-│   └── requirements.txt
+|
+│─ app.py
+│── requirements.txt
 ├── utils/
 │   ├── nlp_utils.py
 │   └── gemini_utils.py
@@ -78,7 +77,7 @@ verifact/
 ## 🚀 Quick Start
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/verifact.git
+git clone https://github.com/pratham-bits/verifact-fake-news-detector
 cd verifact
 pip install -r app/requirements.txt
 python -m spacy download en_core_web_sm
@@ -92,11 +91,11 @@ streamlit run app/app.py
 
 | Model | Accuracy | ROC-AUC |
 |---|---|---|
-| Logistic Regression | — | — |
-| Passive Aggressive | — | — |
-| Random Forest | — | — |
+| Logistic Regression | 0.9651 | 0.9946 |
+| Passive Aggressive | 0.9788 | 0.9974 |
+| Random Forest | 0.9591 | 0.9932 |
 
-*(Fill after running Notebook 2)*
+
 
 ---
 
