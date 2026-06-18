@@ -1,0 +1,28 @@
+# Data files (too large for GitHub)
+data/
+data/*.csv
+data/*.parquet
+
+
+
+# Secrets
+.streamlit/secrets.toml
+*.env
+.env
+*.venv
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.ipynb_checkpoints/
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Colab
+*.ipynb_checkpoints

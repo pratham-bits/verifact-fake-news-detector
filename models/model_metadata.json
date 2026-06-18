@@ -1,0 +1,10 @@
+{
+  "model_name": "Passive Aggressive",
+  "accuracy": 0.9788,
+  "roc_auc": 0.9974,
+  "confidence_threshold": 0.75,
+  "label_map": {
+    "0": "Real",
+    "1": "Fake"
+  }
+}
