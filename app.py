@@ -16,8 +16,6 @@ import pickle
 import warnings
 import numpy as np
 import streamlit as st
-import nltk
-from nltk.corpus import stopwords
 
 warnings.filterwarnings('ignore', category=UserWarning, module='sklearn')
 warnings.filterwarnings('ignore', category=FutureWarning)
@@ -30,27 +28,52 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-nltk.download('stopwords', quiet=True)
-STOP_WORDS = set(stopwords.words('english'))
+# ── NLTK stopwords with offline fallback ─────────────────────────────
+def get_stop_words():
+    try:
+        import nltk
+        nltk.download('stopwords', quiet=True)
+        from nltk.corpus import stopwords
+        return set(stopwords.words('english'))
+    except Exception:
+        # Offline fallback — common English stopwords
+        return {
+            'i','me','my','myself','we','our','ours','ourselves','you','your',
+            'yours','yourself','yourselves','he','him','his','himself','she',
+            'her','hers','herself','it','its','itself','they','them','their',
+            'theirs','themselves','what','which','who','whom','this','that',
+            'these','those','am','is','are','was','were','be','been','being',
+            'have','has','had','having','do','does','did','doing','a','an',
+            'the','and','but','if','or','because','as','until','while','of',
+            'at','by','for','with','about','against','between','into','through',
+            'during','before','after','above','below','to','from','up','down',
+            'in','out','on','off','over','under','again','further','then',
+            'once','here','there','when','where','why','how','all','both',
+            'each','few','more','most','other','some','such','no','nor','not',
+            'only','own','same','so','than','too','very','s','t','can','will',
+            'just','don','should','now','d','ll','m','o','re','ve','y','ain',
+            'aren','couldn','didn','doesn','hadn','hasn','haven','isn','ma',
+            'mightn','mustn','needn','shan','shouldn','wasn','weren','won','wouldn'
+        }
+
+STOP_WORDS = get_stop_words()
 
 # ── Resolve paths relative to this file ─────────────────────────────
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-MODELS_DIR = os.path.join(BASE_DIR, '..', 'models')
+MODELS_DIR = os.path.join(BASE_DIR, 'models')
+
 
 # ── Load resources ───────────────────────────────────────────────────
 @st.cache_resource
 def load_model():
-    base       = os.path.dirname(os.path.abspath(__file__))
-    model_path = os.path.join(base, 'models', 'best_model.pkl')
-    meta_path  = os.path.join(base, 'models', 'model_metadata.json')
+    model_path = os.path.join(MODELS_DIR, 'best_model.pkl')
+    meta_path  = os.path.join(MODELS_DIR, 'model_metadata.json')
 
-    # Debug — remove after fixing
     if not os.path.exists(model_path):
         raise FileNotFoundError(
             f"Model not found at: {model_path}\n"
-            f"BASE_DIR is: {base}\n"
-            f"Files in BASE_DIR: {os.listdir(base)}\n"
-            f"Files in models/: {os.listdir(os.path.join(base, 'models')) if os.path.exists(os.path.join(base, 'models')) else 'models/ folder missing'}"
+            f"BASE_DIR: {BASE_DIR}\n"
+            f"Files: {os.listdir(BASE_DIR)}"
         )
 
     with open(model_path, 'rb') as f:
@@ -58,6 +81,7 @@ def load_model():
     with open(meta_path, 'r') as f:
         metadata = json.load(f)
     return pipeline, metadata
+
 
 @st.cache_resource
 def load_nlp():
@@ -79,8 +103,7 @@ def load_gemini():
         api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
         return None
-    client = genai.Client(api_key=api_key)
-    return client
+    return genai.Client(api_key=api_key)
 
 
 # ── Helper functions ─────────────────────────────────────────────────
@@ -138,37 +161,43 @@ def detect_language(text):
 
 
 def call_gemini_safe(client, prompt, expect_json=False):
-    try:
-        response = client.models.generate_content(
-            model='gemini-2.0-flash',
-            contents=prompt,
-            config={'temperature': 0.2, 'max_output_tokens': 400}
-        )
-        text = response.text.strip()
-        if expect_json:
-            text = re.sub(r'```json|```', '', text).strip()
-            return json.loads(text)
-        return text
+    models_to_try = ['gemini-2.0-flash', 'gemini-2.0-flash-lite']
 
-    except json.JSONDecodeError:
-        return {
-            'verdict': 'Uncertain', 'confidence': 50,
-            'explanation': 'Could not parse Gemini response.',
-            'signals': [], 'verify_tip': 'Check a trusted news source.'
-        }
-    except Exception as e:
-        err = str(e)
-        if '429' in err or 'quota' in err.lower():
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config={'temperature': 0.2, 'max_output_tokens': 400}
+            )
+            text = response.text.strip()
+            if expect_json:
+                text = re.sub(r'```json|```', '', text).strip()
+                return json.loads(text)
+            return text
+
+        except json.JSONDecodeError:
             return {
                 'verdict': 'Uncertain', 'confidence': 50,
-                'explanation': 'Gemini API quota exceeded for today. Showing ML result only. Quota resets daily.',
-                'signals': [], 'verify_tip': 'Cross-check with Reuters, AP, PTI, or The Hindu.'
+                'explanation': 'Could not parse response.',
+                'signals': [], 'verify_tip': 'Check a trusted news source.'
             }
-        return {
-            'error': True, 'verdict': 'Uncertain', 'confidence': 50,
-            'explanation': f'Gemini unavailable: {err[:100]}',
-            'signals': [], 'verify_tip': 'Check a trusted news source.'
-        }
+        except Exception as e:
+            err = str(e)
+            if '429' in err or 'quota' in err.lower():
+                continue  # try next model in list
+            return {
+                'error': True, 'verdict': 'Uncertain', 'confidence': 50,
+                'explanation': 'Gemini temporarily unavailable.',
+                'signals': [], 'verify_tip': 'Check a trusted news source.'
+            }
+
+    # All models quota exhausted
+    return {
+        'verdict': 'Uncertain', 'confidence': 50,
+        'explanation': 'Gemini API quota exceeded for today. Quota resets daily at midnight PST.',
+        'signals': [], 'verify_tip': 'Cross-check with Reuters, AP, PTI, or The Hindu.'
+    }
 
 
 def full_predict(article_text, ml_pipeline, ml_metadata, nlp_model, vader_model, gemini_client):
@@ -202,7 +231,7 @@ def full_predict(article_text, ml_pipeline, ml_metadata, nlp_model, vader_model,
     # ── Non-English → Gemini full analysis ──────────────────────────
     if not nlp_data['is_english']:
         if gemini_available:
-            prompt = f"""You are VeriFact, a multilingual AI fact-checker for students.
+            prompt = f"""You are VeriFact, a multilingual AI fact-checker.
 Analyze this article (any language). Translate if needed, then classify.
 Do NOT answer Uncertain. Always choose Fake or Real.
 Professional journalism with named sources = Real.
@@ -224,7 +253,7 @@ Article: \"\"\"{article_text[:1200]}\"\"\""""
             result.update({
                 'verdict':     'Uncertain',
                 'confidence':  0,
-                'explanation': 'Non-English article detected. Gemini API unavailable for multilingual analysis.',
+                'explanation': 'Non-English article detected. Multilingual analysis unavailable.',
                 'verify_tip':  'Please verify with a trusted local news source.'
             })
         return result
@@ -233,7 +262,6 @@ Article: \"\"\"{article_text[:1200]}\"\"\""""
     cleaned         = clean_text(article_text)
     predicted_class = ml_pipeline.predict([cleaned])[0]
 
-    # WELFake confirmed encoding: 1 = Fake, 0 = Real
     ml_verdict    = 'Fake' if predicted_class == 1 else 'Real'
     score         = ml_pipeline.decision_function([cleaned])[0]
     confidence    = min(float(abs(score) / (abs(score) + 1)), 0.95)
@@ -245,48 +273,86 @@ Article: \"\"\"{article_text[:1200]}\"\"\""""
         'confidence': round(ml_confidence, 1)
     })
 
-    # ── Low confidence → Gemini second opinion ───────────────────────
-    if confidence < threshold:
+    GEMINI_THRESHOLD = 0.55   # below this → ask Gemini
+    MIN_ML_THRESHOLD = 0.30   # below this → don't trust ML at all
+
+    # ── Very low confidence → Gemini or Uncertain ────────────────────
+    if confidence < MIN_ML_THRESHOLD:
         if gemini_available:
-            prompt = f"""You are VeriFact. ML model was uncertain ({ml_verdict}, {ml_confidence:.1f}%).
-Analyze independently. Do NOT answer Uncertain. Always choose Fake or Real.
-Professional journalism with named sources and neutral tone = Real.
-Sensational language, unverified claims, emotional manipulation = Fake.
-Respond ONLY as JSON (no markdown):
-{{"verdict":"Fake" or "Real","confidence":0-100,
-"explanation":"2-3 sentences","signals":["s1","s2"],"verify_tip":"one specific tip"}}
-Article: \"\"\"{article_text[:1000]}\"\"\""""
+            prompt = f"""You are VeriFact. ML model had very low confidence on this article ({ml_confidence:.1f}%).
+    Analyze independently. Do NOT answer Uncertain. Always choose Fake or Real.
+    Professional journalism with named sources and neutral tone = Real.
+    Sensational language, unverified claims, emotional manipulation = Fake.
+    Respond ONLY as JSON (no markdown):
+    {{"verdict":"Fake" or "Real","confidence":0-100,
+    "explanation":"2-3 sentences","signals":["s1","s2"],"verify_tip":"one specific tip"}}
+    Article: \"\"\"{article_text[:1000]}\"\"\""""
             gr = call_gemini_safe(gemini_client, prompt, expect_json=True)
-            result.update({
-                'gemini_used': True,
-                'verdict':     gr.get('verdict', ml_verdict),
-                'confidence':  gr.get('confidence', ml_confidence),
-                'explanation': gr.get('explanation', ''),
-                'signals':     gr.get('signals', []),
-                'verify_tip':  gr.get('verify_tip', '')
-            })
+            if gr.get('verdict') in ['Fake', 'Real']:
+                result.update({
+                    'gemini_used': True,
+                    'verdict':     gr.get('verdict'),
+                    'confidence':  gr.get('confidence', ml_confidence),
+                    'explanation': gr.get('explanation', ''),
+                    'signals':     gr.get('signals', []),
+                    'verify_tip':  gr.get('verify_tip', '')
+                })
+            else:
+                result.update({
+                    'verdict':     'Uncertain',
+                    'confidence':  round(ml_confidence, 1),
+                    'explanation': 'This article is outside the model\'s training distribution. The writing style does not match patterns seen during training. Please verify manually.',
+                    'verify_tip':  'Cross-check with Reuters, AP, PTI, or The Hindu.'
+                })
         else:
-            # No Gemini — don't trust low confidence ML verdict
             result.update({
                 'verdict':     'Uncertain',
                 'confidence':  round(ml_confidence, 1),
-                'explanation': (
-                    f'The ML model had low confidence ({ml_confidence:.1f}%) on this article. '
-                    f'Neutral, professionally-written articles often have weak TF-IDF signal. '
-                    f'Add your Gemini API key in .streamlit/secrets.toml for a full analysis.'
-                ),
-                'verify_tip': 'Cross-check with Reuters, AP, PTI, or The Hindu.'
+                'explanation': 'Confidence too low to make a reliable prediction. This article may be outside the model\'s training distribution.',
+                'verify_tip':  'Cross-check with Reuters, AP, PTI, or The Hindu.'
+            })
+
+    # ── Medium confidence → Gemini second opinion ────────────────────
+    elif confidence < GEMINI_THRESHOLD:
+        if gemini_available:
+            prompt = f"""You are VeriFact. ML model was uncertain ({ml_verdict}, {ml_confidence:.1f}%).
+    Analyze independently. Do NOT answer Uncertain. Always choose Fake or Real.
+    Professional journalism with named sources and neutral tone = Real.
+    Sensational language, unverified claims, emotional manipulation = Fake.
+    Respond ONLY as JSON (no markdown):
+    {{"verdict":"Fake" or "Real","confidence":0-100,
+    "explanation":"2-3 sentences","signals":["s1","s2"],"verify_tip":"one specific tip"}}
+    Article: \"\"\"{article_text[:1000]}\"\"\""""
+            gr = call_gemini_safe(gemini_client, prompt, expect_json=True)
+            if gr.get('verdict') in ['Fake', 'Real']:
+                result.update({
+                    'gemini_used': True,
+                    'verdict':     gr.get('verdict'),
+                    'confidence':  gr.get('confidence', ml_confidence),
+                    'explanation': gr.get('explanation', ''),
+                    'signals':     gr.get('signals', []),
+                    'verify_tip':  gr.get('verify_tip', '')
+                })
+            else:
+                result.update({
+                    'explanation': f'This article shows patterns of {ml_verdict} news based on writing style analysis.',
+                    'verify_tip':  'Cross-check with Reuters, AP, PTI, or The Hindu.'
+                })
+        else:
+            result.update({
+                'explanation': f'This article shows patterns of {ml_verdict} news based on writing style analysis.',
+                'verify_tip':  'Cross-check with Reuters, AP, PTI, or The Hindu.'
             })
 
     # ── High confidence → Gemini explanation only ────────────────────
     else:
         if gemini_available:
-            prompt = f"""You are VeriFact, helping students understand news credibility.
-ML verdict: {ml_verdict} ({ml_confidence:.1f}% confidence)
-Tone score: {tone}/100 | Sentiment: {sentiment['label']} ({sentiment['compound']})
-Article: \"\"\"{article_text[:800]}\"\"\"
-Write 3-4 sentences explaining why this article is likely {ml_verdict}.
-Point out 2-3 specific signals. End with one verification tip. English only."""
+            prompt = f"""You are VeriFact, an AI fact-checking assistant.
+    ML verdict: {ml_verdict} ({ml_confidence:.1f}% confidence)
+    Tone score: {tone}/100 | Sentiment: {sentiment['label']} ({sentiment['compound']})
+    Article: \"\"\"{article_text[:800]}\"\"\"
+    Write 3-4 sentences explaining why this article is likely {ml_verdict}.
+    Point out 2-3 specific signals. End with one verification tip. English only."""
             explanation = call_gemini_safe(gemini_client, prompt, expect_json=False)
             result.update({
                 'gemini_used': True,
@@ -295,98 +361,151 @@ Point out 2-3 specific signals. End with one verification tip. English only."""
             })
         else:
             result.update({
-                'explanation': f'This article shows strong patterns consistent with {ml_verdict} news based on vocabulary and writing style analysis.',
+                'explanation': f'This article shows strong patterns consistent with {ml_verdict} news.',
                 'verify_tip':  'Cross-check with Reuters, AP, PTI, or The Hindu.'
             })
 
     return result
 
 
-# ── Custom CSS (your existing dark mode CSS preserved fully) ─────────
+# ── Custom CSS ───────────────────────────────────────────────────────
 st.markdown("""
-    <style>
-    .stApp {
-        background-color: #0e1117 !important;
-        color: #e0e0e0 !important;
-    }
-    .main .block-container {
-        background-color: #0e1117 !important;
-        color: #e0e0e0 !important;
-        padding: 2rem 1rem !important;
-        max-width: 1200px !important;
-        margin: 0 auto !important;
-    }
-    .centered-heading { text-align: center !important; padding: 1rem 0 0.5rem 0 !important; }
-    .centered-heading h1 { font-size: 3rem !important; color: #ffd700 !important; font-weight: 700 !important; margin-bottom: 0.2rem !important; }
-    .centered-heading h3 { font-size: 1.3rem !important; color: #b0b0b0 !important; font-weight: 400 !important; margin-top: 0 !important; }
-    h1, h2, h3, h4, h5, h6 { color: #ffd700 !important; font-weight: 600 !important; }
-    p, li, span, div, label, .stMarkdown, .stText, .stCaption { color: #e0e0e0 !important; }
-    .stTextArea textarea, .stTextInput input {
-        color: #ffffff !important; background-color: #1e1e1e !important;
-        border: 2px solid #444444 !important; border-radius: 8px !important;
-        font-size: 16px !important; padding: 12px !important; caret-color: #ffd700 !important;
-    }
-    .stTextArea textarea::placeholder, .stTextInput input::placeholder { color: #888888 !important; }
-    .stTextArea textarea:focus, .stTextInput input:focus {
-        border-color: #ffd700 !important;
-        box-shadow: 0 0 0 3px rgba(255, 215, 0, 0.2) !important;
-    }
-    .verdict-fake {
-        background-color: #2a1a1a !important; color: #ff8a80 !important;
-        padding: 20px !important; border-radius: 12px !important;
-        border-left: 6px solid #ff1744 !important; margin: 10px 0 !important;
-    }
-    .verdict-real {
-        background-color: #1a2a1a !important; color: #b9f6ca !important;
-        padding: 20px !important; border-radius: 12px !important;
-        border-left: 6px solid #00e676 !important; margin: 10px 0 !important;
-    }
-    .verdict-uncertain {
-        background-color: #2a2a1a !important; color: #ffab40 !important;
-        padding: 20px !important; border-radius: 12px !important;
-        border-left: 6px solid #ff9100 !important; margin: 10px 0 !important;
-    }
-    .stButton > button {
-        background-color: #2d2d2d !important; color: #e0e0e0 !important;
-        border-radius: 8px !important; border: 2px solid #555555 !important;
-        font-weight: 600 !important; transition: all 0.3s ease !important;
-        padding: 10px 24px !important; width: 100% !important;
-    }
-    .stButton > button:hover {
-        background-color: #3d3d3d !important; color: #ffd700 !important;
-        border-color: #ffd700 !important; transform: translateY(-2px) !important;
-        box-shadow: 0 4px 12px rgba(255, 215, 0, 0.2) !important;
-    }
-    .entity-tag {
-        display: inline-block !important; background-color: #1a237e !important;
-        color: #90caf9 !important; padding: 4px 14px !important;
-        border-radius: 20px !important; margin: 4px !important; font-size: 13px !important;
-        border: 1px solid #3f51b5 !important;
-    }
-    .signal-item {
-        padding: 10px 16px !important; margin: 8px 0 !important;
-        background-color: #1e1e1e !important; border-radius: 8px !important;
-        border-left: 4px solid #ffd700 !important; color: #e0e0e0 !important;
-    }
-    .stMetric { background-color: #1a1a1a !important; padding: 15px !important; border-radius: 10px !important; border: 1px solid #333333 !important; }
-    .stMetric .stMetricLabel { color: #b0b0b0 !important; }
-    .stMetric .stMetricValue { color: #ffd700 !important; font-size: 1.8rem !important; }
-    .css-1d391kg, .css-1lcbmhc, .stSidebar { background-color: #0a0a0f !important; border-right: 1px solid #2a2a2a !important; }
-    hr { border-color: #333333 !important; margin: 1.5rem 0 !important; }
-    ::-webkit-scrollbar { width: 10px; height: 10px; }
-    ::-webkit-scrollbar-track { background: #1a1a1a; border-radius: 10px; }
-    ::-webkit-scrollbar-thumb { background: #444444; border-radius: 10px; }
-    ::-webkit-scrollbar-thumb:hover { background: #ffd700; }
-    @media screen and (max-width: 768px) {
-        .main .block-container { padding: 1rem !important; }
-        .centered-heading h1 { font-size: 2rem !important; }
-        .stMetric .stMetricValue { font-size: 1.4rem !important; }
-    }
-    @media screen and (max-width: 480px) {
-        .centered-heading h1 { font-size: 1.6rem !important; }
-        .stButton > button { padding: 6px 12px !important; font-size: 12px !important; }
-    }
-    </style>
+<style>
+.stApp {
+    background-color: #0e1117 !important;
+    color: #e0e0e0 !important;
+}
+.main .block-container {
+    background-color: #0e1117 !important;
+    color: #e0e0e0 !important;
+    padding: 2rem 1rem !important;
+    max-width: 1200px !important;
+    margin: 0 auto !important;
+}
+.centered-heading {
+    text-align: center !important;
+    padding: 1rem 0 0.5rem 0 !important;
+}
+.title-text {
+    font-size: 3rem !important;
+    color: #ffd700 !important;
+    font-weight: 700 !important;
+    margin-bottom: 0.2rem !important;
+    display: block !important;
+    text-align: center !important;
+}
+.subtitle-text {
+    font-size: 1.3rem !important;
+    color: #b0b0b0 !important;
+    font-weight: 400 !important;
+    margin-top: 0 !important;
+    display: block !important;
+    text-align: center !important;
+}
+h2, h3, h4, h5, h6 { color: #ffd700 !important; font-weight: 600 !important; }
+p, li, label, .stMarkdown, .stText, .stCaption { color: #e0e0e0 !important; }
+.stTextArea textarea, .stTextInput input {
+    color: #ffffff !important;
+    background-color: #1e1e1e !important;
+    border: 2px solid #444444 !important;
+    border-radius: 8px !important;
+    font-size: 16px !important;
+    padding: 12px !important;
+    caret-color: #ffd700 !important;
+}
+.stTextArea textarea::placeholder, .stTextInput input::placeholder {
+    color: #888888 !important;
+}
+.stTextArea textarea:focus, .stTextInput input:focus {
+    border-color: #ffd700 !important;
+    box-shadow: 0 0 0 3px rgba(255, 215, 0, 0.2) !important;
+}
+.verdict-fake {
+    background-color: #2a1a1a !important;
+    color: #ff8a80 !important;
+    padding: 20px !important;
+    border-radius: 12px !important;
+    border-left: 6px solid #ff1744 !important;
+    margin: 10px 0 !important;
+}
+.verdict-real {
+    background-color: #1a2a1a !important;
+    color: #b9f6ca !important;
+    padding: 20px !important;
+    border-radius: 12px !important;
+    border-left: 6px solid #00e676 !important;
+    margin: 10px 0 !important;
+}
+.verdict-uncertain {
+    background-color: #2a2a1a !important;
+    color: #ffab40 !important;
+    padding: 20px !important;
+    border-radius: 12px !important;
+    border-left: 6px solid #ff9100 !important;
+    margin: 10px 0 !important;
+}
+.stButton > button {
+    background-color: #2d2d2d !important;
+    color: #e0e0e0 !important;
+    border-radius: 8px !important;
+    border: 2px solid #555555 !important;
+    font-weight: 600 !important;
+    transition: all 0.3s ease !important;
+    padding: 10px 24px !important;
+    width: 100% !important;
+}
+.stButton > button:hover {
+    background-color: #3d3d3d !important;
+    color: #ffd700 !important;
+    border-color: #ffd700 !important;
+    transform: translateY(-2px) !important;
+    box-shadow: 0 4px 12px rgba(255, 215, 0, 0.2) !important;
+}
+.entity-tag {
+    display: inline-block !important;
+    background-color: #1a237e !important;
+    color: #90caf9 !important;
+    padding: 4px 14px !important;
+    border-radius: 20px !important;
+    margin: 4px !important;
+    font-size: 13px !important;
+    border: 1px solid #3f51b5 !important;
+}
+.signal-item {
+    padding: 10px 16px !important;
+    margin: 8px 0 !important;
+    background-color: #1e1e1e !important;
+    border-radius: 8px !important;
+    border-left: 4px solid #ffd700 !important;
+    color: #e0e0e0 !important;
+}
+.stMetric {
+    background-color: #1a1a1a !important;
+    padding: 15px !important;
+    border-radius: 10px !important;
+    border: 1px solid #333333 !important;
+}
+.stMetric .stMetricLabel { color: #b0b0b0 !important; }
+.stMetric .stMetricValue { color: #ffd700 !important; font-size: 1.8rem !important; }
+.css-1d391kg, .css-1lcbmhc, .stSidebar {
+    background-color: #0a0a0f !important;
+    border-right: 1px solid #2a2a2a !important;
+}
+hr { border-color: #333333 !important; margin: 1.5rem 0 !important; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: #1a1a1a; border-radius: 10px; }
+::-webkit-scrollbar-thumb { background: #444444; border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: #ffd700; }
+@media screen and (max-width: 768px) {
+    .main .block-container { padding: 1rem !important; }
+    .title-text { font-size: 2rem !important; }
+    .stMetric .stMetricValue { font-size: 1.4rem !important; }
+}
+@media screen and (max-width: 480px) {
+    .title-text { font-size: 1.6rem !important; }
+    .stButton > button { padding: 6px 12px !important; font-size: 12px !important; }
+}
+</style>
 """, unsafe_allow_html=True)
 
 
@@ -406,11 +525,10 @@ def set_fake_example():
 
 def set_real_example():
     st.session_state['article_text'] = (
-        "The Reserve Bank of India on Friday kept its benchmark repo rate unchanged "
-        "at 6.5 per cent for the seventh consecutive time, as the six-member Monetary "
-        "Policy Committee voted 5-1 to hold rates. Governor Shaktikanta Das said the "
-        "committee remains focused on withdrawal of accommodation to ensure that "
-        "inflation progressively aligns with the 4 per cent target while supporting growth."
+        "The Federal Reserve raised interest rates by 25 basis points on Wednesday, "
+        "citing continued concerns about inflation. Fed Chair Jerome Powell said the "
+        "decision was unanimous among committee members. Treasury Secretary confirmed "
+        "the administration supports the central bank's independence on monetary policy."
     )
 
 
@@ -418,7 +536,7 @@ def set_real_example():
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/000000/news.png", width=60)
     st.title("VeriFact")
-    st.caption("AI-Powered Fake News Detector for Students")
+    st.caption("AI-Powered Fake News Detector")
     st.divider()
 
     st.subheader("📊 Model Info")
@@ -445,11 +563,12 @@ with st.sidebar:
 
 
 # ── Main content ─────────────────────────────────────────────────────
+# Using spans instead of h1/h2 to preserve emoji rendering
 st.markdown("""
-    <div class="centered-heading">
-        <h1>🔍 VeriFact</h1>
-        <h2>AI-Powered Fake News Detector for Students</h2>
-    </div>
+<div class="centered-heading">
+    <span class="title-text">🔍 VeriFact</span>
+    <span class="subtitle-text">AI-Powered Fake News Detector</span>
+</div>
 """, unsafe_allow_html=True)
 
 st.divider()
@@ -470,28 +589,23 @@ with col2:
 with col3:
     st.button("📌 Real Example", on_click=set_real_example, use_container_width=True)
 
+
 # ── Analysis ─────────────────────────────────────────────────────────
 if analyze_btn and article_input.strip():
     if len(article_input.strip()) < 30:
         st.warning("Please enter at least 30 characters for a meaningful analysis.")
         st.stop()
 
-    with st.spinner("Analyzing article... (this may take a few seconds)"):
+    with st.spinner("Analyzing article..."):
         try:
             ml_pipeline, ml_metadata = load_model()
             nlp_model, vader_model   = load_nlp()
             gemini_client            = load_gemini()
 
-            # Show progress steps
-            status = st.empty()
-            status.caption("🤖 Running ML classifier...")
-            
             result = full_predict(
                 article_input, ml_pipeline, ml_metadata,
                 nlp_model, vader_model, gemini_client
             )
-            status.empty()  # clear status message when done
-            
         except Exception as e:
             st.error(f"Analysis failed: {str(e)}")
             st.stop()
@@ -511,23 +625,18 @@ if analyze_btn and article_input.strip():
         'Fake': '🚨', 'Real': '✅', 'Uncertain': '⚠️'
     }.get(verdict, '❓')
 
-    via_label = (
-        'ML + Gemini'   if result.get('ml_used') and result.get('gemini_used') else
-        'Gemini Only'   if result.get('gemini_used') else
-        'ML Model Only'
-    )
-
+    # ── Verdict card ─────────────────────────────────────────────────
     st.markdown(f"""
-    <div class="{verdict_class}">
-        <h2 style="margin:0">{verdict_emoji} {verdict} News</h2>
-        <p style="margin:0.3rem 0 0 0; font-size:1.1rem">
-            Confidence: <strong>{confidence}%</strong> &nbsp;|&nbsp;
-            Language: <strong>{nlp_data.get('language','en').upper()}</strong> &nbsp;|&nbsp;
-            Analysis: <strong>{via_label}</strong>
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+<div class="{verdict_class}">
+    <h2 style="margin:0; color:inherit !important;">{verdict_emoji} {verdict} News</h2>
+    <p style="margin:0.3rem 0 0 0; font-size:1.1rem; color:inherit !important;">
+        Confidence: <strong>{confidence}%</strong> &nbsp;|&nbsp;
+        Language: <strong>{nlp_data.get('language','en').upper()}</strong>
+    </p>
+</div>
+""", unsafe_allow_html=True)
 
+    # ── Metrics row ──────────────────────────────────────────────────
     st.divider()
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Confidence",      f"{confidence}%")
@@ -536,11 +645,13 @@ if analyze_btn and article_input.strip():
     c3.metric("Sentiment",       sentiment.get('label', 'N/A'))
     c4.metric("Sentiment Score", f"{sentiment.get('compound', 0):.2f}")
 
+    # ── Explanation ──────────────────────────────────────────────────
     if result.get('explanation'):
         st.divider()
         st.subheader("📝 AI Explanation")
         st.info(result['explanation'])
 
+    # ── Signals ──────────────────────────────────────────────────────
     if result.get('signals'):
         st.subheader("🔎 Detection Signals")
         for signal in result['signals']:
@@ -548,10 +659,12 @@ if analyze_btn and article_input.strip():
                 f'<div class="signal-item">• {signal}</div>',
                 unsafe_allow_html=True)
 
+    # ── Verify tip ───────────────────────────────────────────────────
     if result.get('verify_tip'):
         st.subheader("💡 Verification Tip")
         st.success(result['verify_tip'])
 
+    # ── Named entities ───────────────────────────────────────────────
     entities = nlp_data.get('entities', {})
     if any(entities.values()):
         st.divider()
@@ -560,33 +673,33 @@ if analyze_btn and article_input.strip():
         with e1:
             st.write("**👤 People**")
             for p in entities.get('people', []):
-                st.markdown(f'<span class="entity-tag">{p}</span>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<span class="entity-tag">{p}</span>',
+                    unsafe_allow_html=True)
         with e2:
             st.write("**🏢 Organizations**")
             for o in entities.get('orgs', []):
-                st.markdown(f'<span class="entity-tag">{o}</span>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<span class="entity-tag">{o}</span>',
+                    unsafe_allow_html=True)
         with e3:
             st.write("**📍 Places**")
             for pl in entities.get('places', []):
-                st.markdown(f'<span class="entity-tag">{pl}</span>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<span class="entity-tag">{pl}</span>',
+                    unsafe_allow_html=True)
         with e4:
             st.write("**📅 Dates**")
             for d in entities.get('dates', []):
-                st.markdown(f'<span class="entity-tag">{d}</span>', unsafe_allow_html=True)
-
-    with st.expander("🔧 Technical Details"):
-        st.json({
-            'model':       ml_metadata.get('model_name', 'N/A') if result.get('ml_used') else 'N/A',
-            'confidence':  f"{confidence}%",
-            'gemini_used': result.get('gemini_used'),
-            'language':    nlp_data.get('language'),
-            'tone_score':  tone,
-            'sentiment':   sentiment
-        })
+                st.markdown(
+                    f'<span class="entity-tag">{d}</span>',
+                    unsafe_allow_html=True)
 
 elif analyze_btn:
     st.warning("Please paste an article before analyzing.")
 
+
+# ── Footer ────────────────────────────────────────────────────────────
 st.divider()
 st.caption(
     "⚠️ Always verify with trusted sources: Reuters, AP News, PTI, The Hindu, NDTV."
