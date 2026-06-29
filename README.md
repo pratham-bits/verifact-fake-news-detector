@@ -119,4 +119,4 @@ Pandas · Scikit-learn · NLTK · VADER · spaCy · langdetect · Gemini API · 
 
 ---
 
-*EDUNET Foundation × IBM SkillsBuild AI Internship | May 2026 Batch*
+*Try is live at: - https://verifact-fake-news.streamlit.app/*
