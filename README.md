@@ -119,4 +119,4 @@ Pandas · Scikit-learn · NLTK · VADER · spaCy · langdetect · Gemini API · 
 
 ---
 
-*Try is live at: - https://verifact-fake-news.streamlit.app/*
+*Try it live at: - https://verifact-fake-news.streamlit.app/*
